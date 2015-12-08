@@ -1,3 +1,16 @@
+## Overview
+
+The goal of this excercise is to train [Paragraph Vectors](https://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=1&cad=rja&uact=8&ved=0ahUKEwjc77TGksvJAhWPrIMKHTXQDjYQFggdMAA&url=https%3A%2F%2Fcs.stanford.edu%2F~quocle%2Fparagraph_vector.pdf&usg=AFQjCNE-2SsR07iQm78dQqVV-6_Y3ERurA&sig2=gVyET7lCT3Yx2-aPAJd4Lg) on Hacker News dataset (https://github.com/yiransheng/w251-project/blob/master/Google%20BigQuery), and uses resulting vectors to predict submission scores. 
+
+## Process and Results
+
+* 100-dimension vectors for all submission titles are trained using `gensim` and `Spark`.
+* Random Forrest are used to predict submission scores, on dataset with 1810107 rows split into 0.7,0.3 training, test set
+* MSE on the model is `1.1030` on `log(score)`, and `1745.7835` on raw scores
+
+(The predictive power of the model is very _bad_, as the scores of submissions largely depends on submission contents rather than just titles, the same approach might have worked better on more "click-baity" titles)
+
+
 ## Machine Learning Pipeline
 
 Two algorithums are performed on raw data:
