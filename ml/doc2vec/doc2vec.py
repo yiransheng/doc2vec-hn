@@ -1,11 +1,8 @@
-import gensim
 from gensim.models.doc2vec import Doc2Vec, LabeledSentence
 from pyspark import SparkContext
 from pyspark.sql import SQLContext
 
-from cStringIO import StringIO
-
-import os, shutil 
+import os, shutil
 import numpy as np
 import copy
 import cPickle as pickle
@@ -17,6 +14,7 @@ import os
 from threading import Thread
 import urllib2
 import urlparse
+import itertools, time
 
 hosts = dict()
 with open("/etc/hosts", 'r') as f:
@@ -46,24 +44,16 @@ else:
                       .where("title IS NOT NULL") \
                       .where("id IS NOT NULL") \
                       .select("title", "id")
-     
+
     def toLine(row):
         sentence = row.title.replace("\n", " ")
         sentence = sentence.replace("\t", " ")
         id = "TITLE_%d" % row.id
         return sentence + "\t" + id
 
-    submissionsDf.map(toLine).saveAsTextFile(corpus_path) 
+    submissionsDf.map(toLine).saveAsTextFile(corpus_path)
     corpus = submissionsDf.map(lambda x: LabeledSentence(words=x.title.split(), tags=["TITLE_%d" % x.id]))
 
-def gradient(model, sentences): # executes on workers
-    syn0, syn1 = model.syn0.copy(), model.syn1.copy() # previous weights
-    model.train(sentences)
-    return {'syn0': model.syn0 - syn0, 'syn1': model.syn1 - syn1}
- 
-def descent(model, update): # executes on master
-    model.syn0 += update['syn0']
-    model.syn1 += update['syn1']
 
 """Simple reader-writer locks in Python
 Many readers can hold the lock XOR one and only one writer
@@ -71,7 +61,7 @@ Many readers can hold the lock XOR one and only one writer
 http://majid.info/blog/a-reader-writer-lock-for-python/
 """
 import threading
- 
+
 version = """$Id: 04-1.html,v 1.3 2006/12/05 17:45:12 majid Exp $"""
 
 class RWLock:
@@ -132,6 +122,7 @@ class DeepDist:
         :param model: provide a model that can be trained in parallel on the workers
         """
         self.model  = model
+        self.docvec_mapfile = model.docvecs.mapfile_path
         self.lock   = RWLock()
         self.descent  = lambda model, gradient: model
         self.master   = master
@@ -140,6 +131,7 @@ class DeepDist:
         self.received = 0
         self.server   = '0.0.0.0'
         self.pmodel   = None
+        self.np_docvecs = None
         self.min_updates = min_updates
         self.max_updates = max_updates
 
@@ -148,12 +140,27 @@ class DeepDist:
         # self.server = Process(target=self.start)
         # self.server.start()
         return self
-    
+
     def __exit__(self, type, value, traceback):
         url = "http://%s:5000/shutdown"%self.server
         response = urllib2.urlopen(url, '{}').read()
         print"exit performed"
-        
+
+    def sync_cache(self, init=False):
+        map_path = self.model.docvecs.mapfile_path
+        self.model.docvecs.doctag_syn0.flush()
+        # TO-DO: not hard-code this
+        cmd1 = """for i in prj02 prj03 prj04 prj05; \
+            do rsync -av %s.doctag_syn0 root@$i:%s.doctag_syn0; \
+        done""" % (map_path, map_path)
+        cmd2 = """for i in prj02 prj03 prj04 prj05; \
+            do rsync -av %s.doctag_syn0_lockf root@$i:%s.doctag_syn0_lockf; \
+        done""" % (map_path, map_path)
+        if not init:
+            return os.system(cmd1) == 0
+
+        return os.system(cmd1) == 0 and os.system(cmd2) == 0
+
     def start(self):
         from flask import Flask, request
 
@@ -186,7 +193,42 @@ class DeepDist:
                 pmodel = self.pmodel
                 self.lock.release()
             return pmodel
-    
+
+        @app.route('/docvecs', methods=['GET', 'POST', 'PUT'])
+        def docvecs_flask():
+            pass
+            """
+            i = 0
+            while (self.state != 'serving' or self.served >= self.max_updates) and (i < 1000):
+                time.sleep(1)
+                i += 1
+
+            np_docvecs = None
+            self.lock.acquire_read()
+            if not self.np_docvecs:
+                self.lock.release()
+                self.lock.acquire_write()
+                if not self.np_docvecs:
+                    map_path = self.model.docvecs.mapfile_path
+                    doctag_syn0 = self.model.docvecs.doctag_syn0
+                    doctag_syn0_lockf = self.model.docvecs.doctag_syn0_lockf
+                    # length = max(len(self.model.docvecs.doctags),
+                    #                 self.model.docvecs.count)
+                    # doctag_syn0 = np.memmap(mapfile_path+'.doctag_syn0', dtype='float32',
+                    #                      mode='r', shape=(length, self.model.vector_size))
+                    # doctag_syn0_lockf = np.memmap(mapfile_path+'.doctag_syn0_lockf', dtype='float32',
+                    #                      mode='r', shape=(length,))
+                    self.np_docvecs = pickle.dumps((np.array(doctag_syn0),
+                                                    np.array(doctag_syn0_lockf)), -1)
+                self.served += 1
+                np_docvecs = self.np_docvecs
+                self.lock.release()
+            else:
+                self.served += 1
+                np_docvecs = self.np_docvecs
+                self.lock.release()
+            return np_docvecs
+            """
 
         @app.route('/update', methods=['GET', 'POST', 'PUT'])
         def update_flask():
@@ -196,18 +238,20 @@ class DeepDist:
             if self.min_updates <= self.served:
                 state = 'receiving'
             self.received += 1
-            
+
             self.descent(self.model, gradient)
-            
+            self.sync_cache()
+
             if self.received >= self.served and self.min_updates <= self.received:
                 self.received = 0
                 self.served   = 0
                 self.state    = 'serving'
                 self.pmodel = None
-            
+                self.np_docvecs = None
+
             self.lock.release()
             return 'OK'
-        
+
         @app.route('/shutdown', methods=['POST'])
         def shutdown():
             func = request.environ.get('werkzeug.server.shutdown')
@@ -215,7 +259,7 @@ class DeepDist:
                 raise RuntimeError('Not running with the Werkzeug Server')
             func()
             return 'Server shutting down...'
-            
+
         print 'Listening to 0.0.0.0:5000...'
         app.run(host='0.0.0.0', debug=True, threaded=True, use_reloader=False)
 
@@ -233,20 +277,34 @@ class DeepDist:
         print '\n*** Master: %s\n' % master
 
         self.descent = descent
-        
-        model = self.model
+
+        self.sync_cache(True)
         def mapPartitions(data):
             mod = fetch_model(master=master)
             grad = gradient(mod, data)
             return [send_gradient(grad, master=master)]
-        
+
         return rdd.mapPartitions(mapPartitions).collect()
 
 
-def fetch_model(master='localhost:5000'):
-    request = urllib2.Request('http://%s/model' % master,
+def fetch_model(master=None):
+    """
+    req = urllib2.Request('http://%s/docvecs' % master,
         headers={'Content-Type': 'application/deepdist'})
-    return pickle.loads(urllib2.urlopen(request).read())
+
+    doctag_syn0, doctag_syn0_lockf = pickle.loads(urllib2.urlopen(req).read())
+    doctag_syn0_mp = np.memmap(map_path + ".doctag_syn0", dtype=doctag_syn0.dtype, mode='w+',
+                               shape = np.shape(doctag_syn0))
+    doctag_syn0_lockf_mp = np.memmap(map_path + ".doctag_syn0_lockf",dtype=doctag_syn0_lockf.dtype,
+                               mode='w+', shape = np.shape(doctag_syn0_lockf))
+    doctag_syn0_mp[:] = doctag_syn0[:]
+    doctag_syn0_lockf_mp[:] = doctag_syn0_lockf[:]
+    doctag_syn0_mp.flush()
+    doctag_syn0_lockf_mp.flush()
+    """
+    req = urllib2.Request('http://%s/model' % master,
+        headers={'Content-Type': 'application/deepdist'})
+    return pickle.loads(urllib2.urlopen(req).read())
 
 def send_gradient(gradient, master='localhost:5000'):
     if not gradient:
@@ -254,10 +312,11 @@ def send_gradient(gradient, master='localhost:5000'):
     request = urllib2.Request('http://%s/update' % master, pickleDumper.dumps(gradient, -1),
         headers={'Content-Type': 'application/deepdist'})
     return urllib2.urlopen(request).read()
- 
 
 
-model_path = "/root/doc2vec/doc2vec_model"
+
+model_path = "/root/doc2vec/doc2vec_model_final"
+data_path = "/data/_hndata"
 
 if not os.path.exists(model_path):
     os.mkdir(model_path)
@@ -272,38 +331,80 @@ else:
             print e
 
 
-def any2unicode(text, encoding='utf8', errors='strict'):
-    """Convert a string (bytestring in `encoding` or unicode), to unicode."""
-    if isinstance(text, unicode):
-        return text
-    return unicode(text.replace('\xc2\x85', '<newline>'), encoding, errors=errors)
-#     return unicode(text, encoding, errors=errors)
-
-gensim.utils.to_unicode = any2unicode
-
 # init model
-model = Doc2Vec(corpus.collect(), 
-                size=100,
-                max_vocab_size=long(4e5))
-
-# merge with pre-trained word2vec model (from both comments and submissions) 
+# corpus = corpus.sample(False, 0.0001)
+data = corpus.collect()
+model = Doc2Vec(size=100, max_vocab_size=long(4e5),
+                docvecs_mapfile="%s/hndocvec_cache" % data_path)
+model.build_vocab(data)
+# adagrad params
+model.ssyn0 = 0.0
+model.ssyn1 = 0.0
+model.docvecs.sdoctag_syn0 = 0.0
+model.word_count = 0
+model.total_words = len(model.vocab)
+model.ver = 1
+# merge with pre-trained word2vec model (from both comments and submissions)
 # either use pretrained glove dataset (uncased) or word2vec trained from hn dataset
 # model.intersect_word2vec_format("/root/doc2vec/word2vec_model/hn_compatible")
 model.intersect_word2vec_format("/root/doc2vec/word2vec_model/glove_model.txt")
-print "**** estimated memory usage: ****"
+
+
+# Downpour adagrad implementation
+def gradient(model, sentences): # executes on workers
+    syn0,syn1,doctag_syn0 = model.syn0.copy(),model.syn1.copy(),model.docvecs.doctag_syn0.copy() # previous weights
+    words = model.train(sentences, word_count=model.word_count,
+                total_words=model.total_words)
+    return {'syn0' : model.syn0 - syn0,
+            'syn1' : model.syn1 - syn1,
+            'words': words - model.word_count,
+            'ver'  : model.ver,
+            'doctag_syn0' : model.docvecs.doctag_syn0 - doctag_syn0}
+
+def descent(model, update): # executes on master
+
+    alpha = max(model.min_alpha,
+                model.alpha * (1.0 - 1.0 * model.word_count / model.total_words))
+
+    syn0 = update['syn0'] / alpha
+    syn1 = update['syn1'] / alpha
+    doctag_syn0 = update['doctag_syn0'] / alpha
+
+    model.ssyn0 += syn0 * syn0
+    model.ssyn1 += syn1 * syn1
+    model.docvecs.sdoctag_syn0 += doctag_syn0 * doctag_syn0
+
+    model.word_count = long(model.word_count) + long(update['words'])
+    model.ver += 1
+
+    alpha0 = alpha / (1e-6 + np.sqrt(model.ssyn0))
+    alpha1 = alpha / (1e-6 + np.sqrt(model.ssyn1))
+    alphad = alpha / (1e-6 + np.sqrt(model.docvecs.sdoctag_syn0))
+
+    doctag_syn0_deltas = doctag_syn0 * alphad
+    """
+    global last_time
+    if time.time() > last_time + 100:
+        print ("**** docvecs ss deltas: %f ****" % (doctag_syn0_deltas * doctag_syn0_deltas).sum())
+        last_time = time.time()
+    """
+
+    model.syn0 += syn0 * alpha0
+    model.syn1 += syn1 * alpha1
+    model.docvecs.doctag_syn0 += doctag_syn0_deltas
+
+print "**** estimated base memory usage: ****"
 print model.estimate_memory()
+
+
 with DeepDist(model, master="spark://" + hosts["prj01"]) as dd:
     print("training start")
-    dd.train(corpus, gradient, descent)
+    # 300 iterations training
+    for _ in itertools.repeat(None, 3):
+        dd.train(corpus, gradient, descent)
+
     print("training done")
-    dd.model.save("%s/hn" % model_path) 
+    dd.model.save("%s/hn" % model_path)
 
-    def iterate_vecs(docvecs):
-        for tag in docvecs.doctags:
-            yield (tag, docvecs[tag])
 
-    vecs = sc.parallelize( iterate_vecs(dd.model.docvecs) )
-    vecs.saveAsPickleFile("hdfs:///hndata/submission_docvecs")
-
-   
 
