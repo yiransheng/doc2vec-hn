@@ -24,3 +24,7 @@ Currently the code is a bit dirty, using a lot of hardcoded file/hdfs paths in s
 * `classify_hascomment.py` classify if a submission has comment or not
 * `preditions.py` load trained models and run a api server to predict new submission title scores
 
+## Spark Settings
+
+Most of these models involving `gensim` `Doc2Vec` requires large driver memory, which by default Spark allocates very little of. Training of `Doc2Vec` models require driver program to be "long-lived" and hold the model in memory (and sync with workers through a Flask server and `pickle`), therefore, it needs to be running standalone, thun the `yarn-client` depoly mode. 
+
