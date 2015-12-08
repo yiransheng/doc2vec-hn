@@ -9,7 +9,6 @@ Two algorithums are performed on raw data:
 
 However, for document vector, is currently only implemented in python library `gensim` - and does not run in a distributed fashion. Normally the only way to use it would be exprot data from HDFS and run on single node. 
 
-A work around found [<placeholder>]() turned out to be tremendously helpful. 
 
 ### Document Vector Using DeepDist 
 
@@ -51,7 +50,7 @@ Hackernews data dump till Oct. 2015, exported from: [https://bigquery.cloud.goog
 
 ### Import/Export 
 
-Python script `<placeholder>` is used to export data in csv format from BigQuery to Google Cloud Storage. Data is automatically split into 57 files. 
+Python script `/datamunging/export-hn-submissions.py` is used to export data in csv format from BigQuery to Google Cloud Storage. Data is automatically split into 57 files. 
 
 Next, I set permission to all 57 csv files to public, and use a simple shell script for a map-side only job on hadoop cluster to load data into HDFS, removing header rows at the same time (at location `/hndata/raw`). 
 
@@ -63,7 +62,7 @@ One strategy to deal with this is csv SerDe for Hive. However, the overhead of p
 
 __Step 1:__ Untyped Parquet 
 
-Since all csv files are header-less, I have to define data schema in processing script, this is where I found out some limitations of `spark-csv`. For instance, we'd like to treat empty string as `NULL` (example is comments' title field, in raw csv it's recored as empty, unquoted strings), but `spark-csv` is not capable of handle it gracefully (see [this](<placeholder>) github issue).
+Since all csv files are header-less, I have to define data schema in processing script, this is where I found out some limitations of `spark-csv`. For instance, we'd like to treat empty string as `NULL` (example is comments' title field, in raw csv it's recored as empty, unquoted strings), but `spark-csv` is not capable of handle it gracefully (see [this](https://github.com/databricks/spark-csv/issues/86) github issue).
 
 As a compromise, I defined a simple schema with every column set to `StringType` and `Nullable`, and perform type conversion and handling of `null`s in the next step. 
 
