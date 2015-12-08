@@ -14,6 +14,7 @@ $SPARK_HOME/bin/spark-submit --verbose \
 
 Currently the code is a bit dirty, using a lot of hardcoded file/hdfs paths in source code.
 
+
 ## Models
 
 * `doc2vec/word2vec.py` Word2Vec model on all stories and comments

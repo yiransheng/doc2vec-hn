@@ -24,15 +24,15 @@ docvecs = sc.pickleFile("hdfs:///hndata/docvecs_glove_pickle")
 
 def loadVecs(score_pairs):
     '''
-    Executes on works, gensim doc2vec model has been rsynced to each 
-    node on cluster, so each worker can read its own copy 
+    Executes on works, gensim doc2vec model has been rsynced to each
+    node on cluster, so each worker can read its own copy
 
     If the model/np-array is larger than my driver memory, cannot use
     sc.broadcast to sync to each worker
     '''
     import numpy as np
-    docvecs = np.load("/data/_hndata/doc2vec_model/hn.docvecs.doctag_syn0.npy")
-    return [(s, docvecs[i]) for (s,i) in score_pairs]
+    docvecs = np.load("/data/_hndata/doc2vec_model/hn.docvecs.doctag_syn0.npy", mmap_mode='r')
+    return [(s, np.array(docvecs[i])) for (s,i) in score_pairs]
 
 def mergeByKey(a,b):
     '''
@@ -40,10 +40,10 @@ def mergeByKey(a,b):
     second, score first
     '''
     if type(a).__module__ == np.__name__:
-        return (b, a) 
+        return (b, a)
     else:
         return (a, b)
-   
+
 
 vecs = (scores + docvecs).reduceByKey(mergeByKey).map(lambda (key, v): v)
 
